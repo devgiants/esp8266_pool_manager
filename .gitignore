@@ -1,2 +1,4 @@
-init
-lcd
+.vscode
+*.bin
+*.elf
+build/
