@@ -160,11 +160,8 @@ void setup()
   pinMode(FILTRATION_PUMP, OUTPUT);
   pinMode(HEATING_PUMP, OUTPUT);
 
-  // Update data every UPDATE_TIMEOUT seconds
-  updaterTicker.attach(UPDATE_TIMEOUT, updateData);
-
-  // Power off LCD for device and energy savings every LCD_AUTO_OFF_DELAY seconds
-  screenSavingTicker.attach(LCD_AUTO_OFF_DELAY, powerOffScreen);
+  armUpdateTicker();
+  armScreenSaverTicker();
 
   if (!dallasSensors.getAddress(waterTempSensorAddress, 0))
     Log.trace("Unable to find address for water temperature sensor.\n");
@@ -205,6 +202,8 @@ void loop()
   {
     /* Log.trace("Key pressed : %s\n", key); */
 
+    reArmScreenSaverTicker();
+
     // Handle actions only if screen alive
     if (screenAlive)
     {
@@ -244,8 +243,9 @@ void loop()
       }
     }
 
-    // Reactivate screen 
-    else {
+    // Reactivate screen
+    else
+    {
       needToUpdateDisplay = true;
     }
   }
@@ -268,7 +268,7 @@ void updateData()
 {
   // Display update message only if screen alive
   if (screenAlive)
-  {    
+  {
     displayUpdateMessage("MAJ...");
   }
 
@@ -307,6 +307,7 @@ void updateDisplay()
   {
     lcd.backlight();
     screenAlive = true;
+    armScreenSaverTicker();
   }
 
   switch (currentScreen)
@@ -340,7 +341,7 @@ void powerOffScreen()
   Log.trace("Shutdown screen : %d timeout reached\n", LCD_AUTO_OFF_DELAY);
   lcd.noBacklight();
   screenAlive = false;
-  /* screenSavingTicker.stop(); */
+  screenSavingTicker.detach();
 }
 
 /**
@@ -382,4 +383,23 @@ void displayArrows()
   lcd.print("<");
   lcd.setCursor(19, 3);
   lcd.print(">");
+}
+
+void armUpdateTicker()
+{
+  // Update data every UPDATE_TIMEOUT seconds
+  updaterTicker.attach(UPDATE_TIMEOUT, updateData);
+}
+
+void armScreenSaverTicker()
+{
+  // Power off LCD for device and energy savings every LCD_AUTO_OFF_DELAY seconds
+  screenSavingTicker.attach(LCD_AUTO_OFF_DELAY, powerOffScreen);
+}
+
+void reArmScreenSaverTicker() 
+{
+  Log.trace("Rearm screen saving watchdog");  
+  screenSavingTicker.detach();
+  armScreenSaverTicker();
 }
