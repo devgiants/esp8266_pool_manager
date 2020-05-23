@@ -1,20 +1,16 @@
-/****************************
+/********************************************************
  * Includes
  */
 #include <WiFi.h>
 #include <string.h>
 #include <Ticker.h>
-
-// TODO handle why LCD_DELAY function is not taken in account
-#define LCD_DELAY 500
-
 #include <liquid-crystal-i2c-with-delay.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ArduinoLog.h>
 #include <Keypad.h>
 
-/****************************
+/********************************************************
  * Define
  */
 
@@ -49,7 +45,6 @@
 
 // GPIO Pin definition
 #define FILTRATION_PUMP 23
-#define HEATING_PUMP 19
 
 // Time definition
 #define UPDATE_TIMEOUT 10
@@ -59,28 +54,44 @@
 #define TEMPERATURE_SCREEN_ID 1
 #define SECOND_SCREEN_ID 2
 
-/****************************
+// Period definition
+#define PERIOD_INTERVAL 21600
+
+/********************************************************
  * Constants
  */
 const String updateMessage = "MAJ...";
 const String version = "V0.1";
 
-// Main objects
+/********************************************************
+ * Main complex objects
+ */
+
+// LCD driver
 LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS_NUMBER, LCD_ROWS_NUMBER);
+
+// Degree symbol for display
+uint8_t celsiusDegreeSymbol[8] = {0x8, 0xf4, 0x8, 0x43, 0x4, 0x4, 0x43, 0x0};
+
+// Tickers for periodic actions
 Ticker updaterTicker;
 Ticker screenSavingTicker;
+
+// OneWire bus
 OneWire ow(ONE_WIRE_BUS);
+
+// Temperatures sensors
 DallasTemperature dallasSensors(&ow);
 
 DeviceAddress waterTempSensorAddress = {0x28, 0xCA, 0x98, 0xCF, 0x05, 0x0, 0x0, 0x51};
-DeviceAddress heatWaterSystemTempSensorAddress = {0x28, 0xC4, 0xA8, 0xCF, 0x05, 0x0, 0x0, 0xC6};
+DeviceAddress airTempSensorAddress = {0x28, 0xCA, 0x98, 0xCF, 0x05, 0x0, 0x0, 0x51};
 
 DeviceAddress *dallasSensorsAddresses[] = {
-    &waterTempSensorAddress,          // ID 0
-    &heatWaterSystemTempSensorAddress // ID 1
+    &waterTempSensorAddress,
+    &airTempSensorAddress,
 };
 
-// Init Keypad
+// Keypad
 char keys[KEYPAD_ROWS_NUMBER][KEYPAD_COLUMNS_NUMBER] = {
     {'1', '2', '3', '>'},
     {'4', '5', '6', '<'},
@@ -91,30 +102,45 @@ byte rowPins[KEYPAD_ROWS_NUMBER] = {KEYPAD_ROW_1, KEYPAD_ROW_2, KEYPAD_ROW_3, KE
 byte colPins[KEYPAD_COLUMNS_NUMBER] = {KEYPAD_COLUMN_1, KEYPAD_COLUMN_2, KEYPAD_COLUMN_3, KEYPAD_COLUMN_4};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, KEYPAD_ROWS_NUMBER, KEYPAD_COLUMNS_NUMBER);
 
+// Screens
 int screens[] = {TEMPERATURE_SCREEN_ID, SECOND_SCREEN_ID};
 
-/****************************
+/********************************************************
  * Variables
  */
 
+// Period counter, for storing datas along PERIOD_INTERVAL
+int periodUpdateCounter = 0;
+
+// Array storages for data
+float waterTemperatures[(int)(PERIOD_INTERVAL / UPDATE_TIMEOUT)];
+float airTemperatures[(int)(PERIOD_INTERVAL / UPDATE_TIMEOUT)];
+
 // Output values
 bool filtrationPumpValue = HIGH;
-bool heatingPumpValue = HIGH;
-
-// Degree symbol for display
-uint8_t celsiusDegreeSymbol[8] = {0x8, 0xf4, 0x8, 0x43, 0x4, 0x4, 0x43, 0x0};
 
 // Temperatures data
-float waterTemperature, heatSystemWaterTemperature;
+float waterTemperature, airTemperature;
 
 // Screen data
 int currentScreen = TEMPERATURE_SCREEN_ID;
 int screensNumber = sizeof(screens) / sizeof(screens[0]);
 
-// Update
+// Update triggers
+// Note : those triggers exists in order to light up as much as possible loads on interrupts.
+// Triggers are setup and handled inside the main loop
 bool needToUpdateData = false;
 bool needToUpdateDisplay = true;
 bool screenAlive = true;
+
+/********************************************************
+ * Functions
+ */
+
+
+/**************************
+ * Arduino
+ */
 
 /**
  * Setup device an initiates everything
@@ -145,6 +171,8 @@ void setup()
   // Create custom chars and assign them to slots
   lcd.createChar(CELSIUS_DEGREE_SYMBOL, celsiusDegreeSymbol);
 
+  Log.trace("data array size, according to PERIOD_INTERVAL and UPDATE_TIMEOUT : %d", (int)(PERIOD_INTERVAL / UPDATE_TIMEOUT));
+
   // Print startup message
   lcd.backlight();
   lcd.setCursor(3, 0);
@@ -158,36 +186,25 @@ void setup()
 
   // Define pin mode for custom GPIO
   pinMode(FILTRATION_PUMP, OUTPUT);
-  pinMode(HEATING_PUMP, OUTPUT);
 
+  // Arm tickers for starting misc periods
   armUpdateTicker();
   armScreenSaverTicker();
 
+  // Alert if temperature sensors not found on OW bus
   if (!dallasSensors.getAddress(waterTempSensorAddress, 0))
-    Log.trace("Unable to find address for water temperature sensor.\n");
-  if (!dallasSensors.getAddress(heatWaterSystemTempSensorAddress, 1))
-    Log.trace("Unable to find address for heating system water temperature sensor.\n");
+    Log.error("Unable to find address for water temperature sensor.\n");
+  if (!dallasSensors.getAddress(airTempSensorAddress, 1))
+    Log.error("Unable to find address for air temperature sensor.\n");
 
-  // set the resolution to 9 bit per device
+  // Set the resolution to 9 and 12 bits (per device configuration)
   Log.trace("Set temperature sensors to given precision\n");
   dallasSensors.setResolution(waterTempSensorAddress, MAX_TEMPERATURE_PRECISION);
-  dallasSensors.setResolution(heatWaterSystemTempSensorAddress, MIN_TEMPERATURE_PRECISION);
+  dallasSensors.setResolution(airTempSensorAddress, MIN_TEMPERATURE_PRECISION);
 
   // Launch first data update
   needToUpdateData = true;
   needToUpdateDisplay = true;
-}
-
-// function to print a device address
-void printAddress(DeviceAddress deviceAddress)
-{
-  for (uint8_t i = 0; i < 8; i++)
-  {
-    // zero pad the address if necessary
-    if (deviceAddress[i] < 16)
-      Serial.print("0");
-    Serial.print(deviceAddress[i], HEX);
-  }
 }
 
 /**
@@ -200,8 +217,10 @@ void loop()
   // Handle keypress
   if (key != NO_KEY)
   {
+    // TODO : find why it makes MCU crash
     /* Log.trace("Key pressed : %s\n", key); */
 
+    // Key pressed : need to reset watchdog for screen saving
     reArmScreenSaverTicker();
 
     // Handle actions only if screen alive
@@ -212,6 +231,8 @@ void loop()
       case '>':
         Log.trace("Max screen: %d\n", screensNumber);
         Log.trace("Current screen: %d\n", currentScreen);
+
+        // If last screen reached, create infinite loop by sending back to first one
         if (currentScreen == screensNumber)
         {
           currentScreen = screens[0];
@@ -229,6 +250,8 @@ void loop()
       case '<':
         Log.trace("Current screen: %d\n", currentScreen);
         Log.trace("First screen: %d\n", screens[0]);
+
+        // If first screen reached, create infinite loop by sending back to last one
         if (currentScreen == screens[0])
         {
           currentScreen = screens[screensNumber - 1];
@@ -243,7 +266,7 @@ void loop()
       }
     }
 
-    // Reactivate screen
+    // Reactivate screen : key was pressed and user needs feedback
     else
     {
       needToUpdateDisplay = true;
@@ -256,6 +279,7 @@ void loop()
     updateData();
     needToUpdateData = false;
   }
+
   // Handle update display
   if (needToUpdateDisplay)
   {
@@ -264,41 +288,13 @@ void loop()
   }
 }
 
-void updateData()
-{
-  // Display update message only if screen alive
-  if (screenAlive)
-  {
-    displayUpdateMessage("MAJ...");
-  }
+/**************************
+ * Display
+ */
 
-  Log.trace("START UPDATE DATA\n");
-
-  // Update OneWire sensors data
-  Log.trace("Request temperatures\n");
-  dallasSensors.requestTemperatures();
-
-  waterTemperature = dallasSensors.getTempC(waterTempSensorAddress);
-  heatSystemWaterTemperature = dallasSensors.getTempC(heatWaterSystemTempSensorAddress);
-
-  Log.trace("Water temperature : %F\n", waterTemperature);
-  Log.trace("Heating system water temperature: %F\n", heatSystemWaterTemperature);
-
-  digitalWrite(FILTRATION_PUMP, filtrationPumpValue);
-  digitalWrite(HEATING_PUMP, heatingPumpValue);
-
-  /*  filtrationPumpValue = !filtrationPumpValue;
-  heatingPumpValue = !heatingPumpValue; */
-
-  // Trigger display update only if screen is alive
-  if (screenAlive)
-  {
-    needToUpdateDisplay = true;
-  }
-
-  Log.trace("END UPDATE DATA\n");
-}
-
+/**
+ * Update display with current screen data 
+ */
 void updateDisplay()
 {
 
@@ -315,14 +311,10 @@ void updateDisplay()
   case TEMPERATURE_SCREEN_ID:
     lcd.clear();
 
-    lcd.setCursor(0, 0);
-    lcd.print("Tp: " + String(waterTemperature, 1) + (char)CELSIUS_DEGREE_SYMBOL);
-
-    lcd.rightToLeft();
-    lcd.setCursor(LCD_COLS_NUMBER - 1, 0);
-    lcd.print(reverse("Tc: " + String(heatSystemWaterTemperature, 0) + (char)CELSIUS_DEGREE_SYMBOL));
-    lcd.leftToRight();
-
+    writeMeasureOnFullLine(0, "Temp. Air:", String(airTemperature, 1) + (char)CELSIUS_DEGREE_SYMBOL);
+    writeMeasureOnFullLine(1, "Temp. Piscine:", String(waterTemperature, 1) + (char)CELSIUS_DEGREE_SYMBOL);
+    writeMeasureOnFullLine(2, "Pompe:", "100% 5h50/6h");
+    
     displayArrows();
     break;
 
@@ -336,6 +328,9 @@ void updateDisplay()
   }
 }
 
+/**
+ *  Power off screen
+ */ 
 void powerOffScreen()
 {
   Log.trace("Shutdown screen : %d timeout reached\n", LCD_AUTO_OFF_DELAY);
@@ -345,7 +340,21 @@ void powerOffScreen()
 }
 
 /**
- * Function to calculate spaces to set for center/right alignment 
+ * Uses full line width by displaying measure (name on left and measure on right)
+ */ 
+void writeMeasureOnFullLine(int lineNumber, String leftText, String rightText)
+{
+  lcd.setCursor(0, lineNumber);
+  lcd.print(leftText);
+
+  lcd.rightToLeft();
+  lcd.setCursor(LCD_COLS_NUMBER - 1, lineNumber);
+  lcd.print(reverse(rightText));
+  lcd.leftToRight();
+}
+
+/**
+ * Calculate spaces to set for center/right alignment 
  */
 int calculateIndent(String stringToDisplay, String mode = CENTER)
 {
@@ -359,12 +368,18 @@ int calculateIndent(String stringToDisplay, String mode = CENTER)
     return 0;
 }
 
+/**
+ * Display update message on navigation/status line
+ */ 
 void displayUpdateMessage(String message)
 {
   lcd.setCursor(calculateIndent(message), 3);
   lcd.print(message);
 }
 
+/**
+ * Reverse string : needed when displaying on LCD from right to left
+ */
 String reverse(String message)
 {
   String reversedMessage = "";
@@ -376,6 +391,9 @@ String reverse(String message)
   return reversedMessage;
 }
 
+/**
+ * Display arrows needed for screen navigation (on status line)
+ */ 
 void displayArrows()
 {
   // Display arrows
@@ -385,21 +403,110 @@ void displayArrows()
   lcd.print(">");
 }
 
+/**************************
+ * One Wire
+ */
+
+/**
+ * Print a OW device address (for address sweep on sensor connection)
+ */
+void printAddress(DeviceAddress deviceAddress)
+{
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    // zero pad the address if necessary
+    if (deviceAddress[i] < 16)
+      Serial.print("0");
+    Serial.print(deviceAddress[i], HEX);
+  }
+}
+
+/**
+ * Collect and stores temperatures
+ */
+void collectAndStoreTemperatures()
+{
+  // Note : this code is not DRY, but AFAIS this is the best approach from a performance POV.
+  // Update OneWire sensors data
+  Log.trace("Request temperatures\n");
+  dallasSensors.requestTemperatures();
+
+  waterTemperature = dallasSensors.getTempC(waterTempSensorAddress);
+  airTemperature = dallasSensors.getTempC(airTempSensorAddress);
+
+  Log.trace("Water temperature : %F\n", waterTemperature);
+  Log.trace("Air temperature: %F\n", airTemperature);
+
+  // Dynamic storage for pumping percentage calculation
+  waterTemperatures[periodUpdateCounter] = waterTemperature;
+  airTemperatures[periodUpdateCounter] = airTemperature;
+}
+
+/**************************
+ * Tickers
+ */
+
+/**
+ * Handle update data
+ */
+void updateData()
+{
+  // Display update message only if screen alive
+  if (screenAlive)
+  {
+    displayUpdateMessage("MAJ...");
+  }
+
+  Log.trace("START UPDATE DATA\n");
+  Log.trace("Period counter : %d\n", periodUpdateCounter);
+
+  collectAndStoreTemperatures();
+
+  /*  digitalWrite(FILTRATION_PUMP, filtrationPumpValue); */
+
+  /*  filtrationPumpValue = !filtrationPumpValue;
+  heatingPumpValue = !heatingPumpValue; */
+
+  // Trigger display update only if screen is alive
+  if (screenAlive)
+  {
+    needToUpdateDisplay = true;
+  }
+
+  // Increment period update counter for array writing
+  periodUpdateCounter++;
+
+  Log.trace("END UPDATE DATA\n");
+}
+
+/**
+ * Arm update ticker for update periods
+ */ 
 void armUpdateTicker()
 {
   // Update data every UPDATE_TIMEOUT seconds
   updaterTicker.attach(UPDATE_TIMEOUT, updateData);
 }
 
+/**
+ * Arm screen saver ticker for powering off screen
+ */
 void armScreenSaverTicker()
 {
   // Power off LCD for device and energy savings every LCD_AUTO_OFF_DELAY seconds
   screenSavingTicker.attach(LCD_AUTO_OFF_DELAY, powerOffScreen);
 }
 
-void reArmScreenSaverTicker() 
+/**
+ * Ream screen saver ticker 
+ */ 
+void reArmScreenSaverTicker()
 {
-  Log.trace("Rearm screen saving watchdog");  
+  Log.trace("Rearm screen saving watchdog");
   screenSavingTicker.detach();
   armScreenSaverTicker();
 }
+
+/**
+ * Pool management
+ */
