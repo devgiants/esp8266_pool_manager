@@ -1,19 +1,24 @@
-# ESP8266 Pool Manager
-Provides a complete pool management (T°C, pH, pump...) with an LCD display. Based on ESP8266 chip. More to come
-## Project initialization on desktop machine
-Execute `bash init_project.bash` to retrieve needed library. It's a simple system to avoid git modules so far. I Will implement Google Repo ASAIC.
-## Chip deployement
-Use firmware.bin to ensure maximum compatibility (it's a firmware compiled with excellent [NodeMCU build tool](http://nodemcu-build.com)). It embeds following modules:
-- bit
-- crypto
-- dht
-- ds18b20
-- file
-- gpio
-- i2c
-- net
-- node
-- tmr 
-- uart
-- wifi
-- tls
+# ESP32 Pool Manager
+
+This project aims to provide a simple but complete __pool manager system__. Starting simple, it has so far :
+
+- Air temperature capture (DS18 sensor, one wire)
+- Water temperature capture (DS18 sensor, one wire)
+- Fitration pump relay control
+
+## Filtration pump algorithm
+
+Variables :
+- PumpingTime<sub>per period</sub> : this is the pumping time calculated
+- Temp<sub>air</sub> : this is the air temperature
+- Period : the period calculation time : 24h...
+
+According to pool specialists, filtration pump command must be driven by following formula: 
+
+### Temp<sub>air</sub> < 25°C
+> PumpingTime<sub>per period</sub> =  Temp<sub>air</sub> / 2
+
+### Temp<sub>air</sub> > 25°C
+> PumpingTime<sub>per period</sub> =  Period
+
+This very last case means that if Temp<sub>air</sub> > 25°C, __filtration pump must be ON all the time__.
